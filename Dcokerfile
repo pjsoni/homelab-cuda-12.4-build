@@ -1,0 +1,99 @@
+# =========================================================
+# CUDA 12.4 Minimal Runtime
+#
+# Purpose:
+#   - Runtime only
+#   - No CUDA compiler
+#   - No CUDA headers
+#   - CUDA 12.4 user-space runtime
+#   - CUDA 12.4 forward-compatibility libraries
+#   - cuBLAS
+#   - NCCL
+#   - Architecture-agnostic
+#
+# GPU architecture is determined by the application image
+# / CUDA binary at runtime.
+# =========================================================
+
+FROM ubuntu:22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG NVARCH=x86_64
+
+# ---------------------------------------------------------
+# Base utilities + NVIDIA CUDA repository
+# ---------------------------------------------------------
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        wget && \
+    wget -q \
+        https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/${NVARCH}/cuda-keyring_1.1-1_all.deb \
+        -O /tmp/cuda-keyring.deb && \
+    dpkg -i /tmp/cuda-keyring.deb && \
+    rm -f /tmp/cuda-keyring.deb && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libgomp1 \
+        cuda-cudart-12-4 \
+        cuda-compat-12-4 \
+        libcublas-12-4 \
+        libnccl2 && \
+    apt-get purge -y --auto-remove \
+        wget && \
+    rm -rf \
+        /var/lib/apt/lists/* \
+        /var/cache/apt/* \
+        /tmp/*
+
+# ---------------------------------------------------------
+# CUDA library paths
+#
+# CUDA packages install versioned libraries under:
+#
+#   /usr/local/cuda-12.4/
+#
+# cuda-compat-12-4 installs forward-compatibility
+# libraries under:
+#
+#   /usr/local/cuda-12.4/compat/
+#
+# ---------------------------------------------------------
+
+RUN printf '%s\n' \
+        '/usr/local/cuda-12.4/lib64' \
+        '/usr/local/cuda-12.4/compat' \
+        > /etc/ld.so.conf.d/cuda-12-4.conf && \
+    ldconfig
+
+# ---------------------------------------------------------
+# CUDA environment
+# ---------------------------------------------------------
+
+ENV CUDA_HOME=/usr/local/cuda-12.4
+
+ENV PATH=/usr/local/cuda-12.4/bin:${PATH}
+
+ENV LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:/usr/local/cuda-12.4/compat
+
+# ---------------------------------------------------------
+# NVIDIA Container Runtime defaults
+# ---------------------------------------------------------
+
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# ---------------------------------------------------------
+# Runtime sanity checks
+# ---------------------------------------------------------
+
+RUN set -eux; \
+    ldconfig -p | grep -E \
+        'libcuda\.so|libcudart\.so|libcublas\.so|libnccl\.so'
+
+# ---------------------------------------------------------
+# Default command
+# ---------------------------------------------------------
+
+CMD ["/bin/bash"]
