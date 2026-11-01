@@ -3,10 +3,10 @@
 # CUDA DEVELOPMENT BASE
 #
 # Build-stage baseline for every CUDA application.
-# Tag:   pjsoni/cuda-base:12.4-devel
-# Usage: FROM pjsoni/cuda-base:12.4-devel AS build
+# Tag:   ghcr.io/pjsoni/cuda-base:12.4-devel
+# Usage: FROM ghcr.io/pjsoni/cuda-base:12.4-devel AS build
 #
-# Starts from your mirror of NVIDIA's devel image, which
+# Starts from nvidia/cuda:12.4.1-devel-ubuntu22.04, which
 # already ships nvcc, the full toolkit headers, cuBLAS +
 # libcublas-dev, NCCL + libnccl-dev and the libcuda link stubs.
 # Only generic build tooling is added; nothing app-specific
