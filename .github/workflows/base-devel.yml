@@ -29,6 +29,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # Folder (relative to repo root) that contains the devel Dockerfile.
+  # Must match the `paths:` filters above.
+  CONTEXT: base/devel
   REGISTRY: ghcr.io
   IMAGE_NAME: cuda-base
   # Upstream NVIDIA devel image this base builds on (Docker Hub, public)
@@ -49,6 +52,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Fail early with a readable message if the build folder is missing.
+      - name: Check build context
+        run: |
+          if [ ! -f "${CONTEXT}/Dockerfile" ]; then
+            echo "::error::${CONTEXT}/Dockerfile not found in ${GITHUB_REPOSITORY}@${GITHUB_SHA::7}. Dockerfiles in this commit:"
+            git ls-files | grep -i dockerfile || echo "(none committed)"
+            exit 1
+          fi
 
       # GHCR image names must be lowercase; repository_owner may not be.
       - name: Resolve image name
@@ -96,7 +108,7 @@ jobs:
       - name: Build
         uses: docker/build-push-action@v6
         with:
-          context: base/devel
+          context: ${{ env.CONTEXT }}
           load: true
           push: false
           pull: true
