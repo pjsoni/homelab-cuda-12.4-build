@@ -1,99 +1,75 @@
+# syntax=docker/dockerfile:1.7
 # =========================================================
-# CUDA 12.4 Minimal Runtime
+# CUDA DEVELOPMENT BASE
 #
-# Purpose:
-#   - Runtime only
-#   - No CUDA compiler
-#   - No CUDA headers
-#   - CUDA 12.4 user-space runtime
-#   - CUDA 12.4 forward-compatibility libraries
-#   - cuBLAS
-#   - NCCL
-#   - Architecture-agnostic
+# Build-stage baseline for every CUDA application.
+# Tag:   ghcr.io/pjsoni/cuda-base:12.4-devel
+# Usage: FROM ghcr.io/pjsoni/cuda-base:12.4-devel AS build
 #
-# GPU architecture is determined by the application image
-# / CUDA binary at runtime.
+# Starts from nvidia/cuda:12.4.1-devel-ubuntu22.04, which
+# already ships nvcc, the full toolkit headers, cuBLAS +
+# libcublas-dev, NCCL + libnccl-dev and the libcuda link stubs.
+# Only generic build tooling is added; nothing app-specific
+# (ffmpeg, SDL, etc. belong in the app's own build stage).
+#
+# NOTE for CMake projects: ggml (and some others) decide their
+# CUDA arch list BEFORE enable_language(CUDA), so they ignore the
+# CUDAARCHS env var below. Always pass it through explicitly:
+#   -DCMAKE_CUDA_ARCHITECTURES="${CUDAARCHS}"
 # =========================================================
 
-FROM ubuntu:22.04
+ARG BASE_IMAGE=nvidia/cuda:12.4.1-devel-ubuntu22.04
+FROM ${BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG NVARCH=x86_64
+# Ubuntu 22.04 ships CMake 3.22; many CUDA projects now want newer.
+ARG CMAKE_VERSION=3.31.6
+# Default GPU targets for this fleet: P100 = sm_60, P4/P40 = sm_61.
+ARG CUDA_ARCHS="60;61"
 
-# ---------------------------------------------------------
-# Base utilities + NVIDIA CUDA repository
-# ---------------------------------------------------------
+LABEL org.opencontainers.image.title="cuda-base-devel" \
+      org.opencontainers.image.description="CUDA build baseline (Pascal SM60/SM61)"
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        ca-certificates \
-        wget && \
-    wget -q \
-        https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/${NVARCH}/cuda-keyring_1.1-1_all.deb \
-        -O /tmp/cuda-keyring.deb && \
-    dpkg -i /tmp/cuda-keyring.deb && \
-    rm -f /tmp/cuda-keyring.deb && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-        libgomp1 \
-        cuda-cudart-12-4 \
-        cuda-compat-12-4 \
-        libcublas-12-4 \
-        libnccl2 && \
-    apt-get purge -y --auto-remove \
-        wget && \
-    rm -rf \
-        /var/lib/apt/lists/* \
-        /var/cache/apt/* \
-        /tmp/*
-
-# ---------------------------------------------------------
-# CUDA library paths
-#
-# CUDA packages install versioned libraries under:
-#
-#   /usr/local/cuda-12.4/
-#
-# cuda-compat-12-4 installs forward-compatibility
-# libraries under:
-#
-#   /usr/local/cuda-12.4/compat/
-#
-# ---------------------------------------------------------
-
-RUN printf '%s\n' \
-        '/usr/local/cuda-12.4/lib64' \
-        '/usr/local/cuda-12.4/compat' \
-        > /etc/ld.so.conf.d/cuda-12-4.conf && \
-    ldconfig
-
-# ---------------------------------------------------------
-# CUDA environment
-# ---------------------------------------------------------
-
-ENV CUDA_HOME=/usr/local/cuda-12.4
-
-ENV PATH=/usr/local/cuda-12.4/bin:${PATH}
-
-ENV LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:/usr/local/cuda-12.4/compat
-
-# ---------------------------------------------------------
-# NVIDIA Container Runtime defaults
-# ---------------------------------------------------------
-
-ENV NVIDIA_VISIBLE_DEVICES=all
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
-
-# ---------------------------------------------------------
-# Runtime sanity checks
-# ---------------------------------------------------------
-
+# Generic build tooling only. libcublas-dev is NOT installed here
+# because NVIDIA's devel image already contains it.
 RUN set -eux; \
-    ldconfig -p | grep -E \
-        'libcuda\.so|libcudart\.so|libcublas\.so|libnccl\.so'
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        ninja-build \
+        ccache \
+        pkg-config \
+        git \
+        curl \
+        wget \
+        ca-certificates \
+        python3; \
+    rm -rf /var/lib/apt/lists/*
 
-# ---------------------------------------------------------
-# Default command
-# ---------------------------------------------------------
+# Current CMake from Kitware's release tarball (x86_64 or aarch64).
+RUN set -eux; \
+    curl -fsSL "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz" \
+        | tar -xz --strip-components=1 -C /usr/local; \
+    rm -rf /usr/local/doc /usr/local/man; \
+    cmake --version
 
-CMD ["/bin/bash"]
+# Build defaults every project inherits. All are read natively by CMake:
+#   CUDAARCHS                    -> default CMAKE_CUDA_ARCHITECTURES (CMake >= 3.20)
+#   CMAKE_GENERATOR              -> Ninja instead of Makefiles
+#   CMAKE_BUILD_TYPE             -> Release (CMake >= 3.22)
+#   CMAKE_<LANG>_COMPILER_LAUNCHER -> ccache, pair with a BuildKit cache mount on /ccache
+ENV CUDA_HOME=/usr/local/cuda \
+    CUDAARCHS="${CUDA_ARCHS}" \
+    CMAKE_GENERATOR=Ninja \
+    CMAKE_BUILD_TYPE=Release \
+    CMAKE_C_COMPILER_LAUNCHER=ccache \
+    CMAKE_CXX_COMPILER_LAUNCHER=ccache \
+    CMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+    CCACHE_DIR=/ccache \
+    CCACHE_MAXSIZE=5G
+
+# Deliberately NOT adding /usr/local/cuda/compat or the libcuda stubs
+# to LD_LIBRARY_PATH: either one breaks real GPU access if this image
+# is ever run with --gpus for interactive development.
+
+WORKDIR /src

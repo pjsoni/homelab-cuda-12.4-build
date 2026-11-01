@@ -1,0 +1,168 @@
+name: Base image - CUDA devel
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "base/devel/**"
+      - ".github/workflows/base-devel.yml"
+  pull_request:
+    paths:
+      - "base/devel/**"
+      - ".github/workflows/base-devel.yml"
+  schedule:
+    # Weekly rebuild to pick up Ubuntu/NVIDIA security patches (Mon 03:17 UTC)
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      cuda_archs:
+        description: "CUDA architectures baked in as CUDAARCHS"
+        default: "60;61"
+        required: true
+      push:
+        description: "Push the image to GHCR"
+        type: boolean
+        default: true
+
+concurrency:
+  group: base-devel-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Folder (relative to repo root) that contains the devel Dockerfile.
+  # Must match the `paths:` filters above.
+  CONTEXT: base/devel
+  REGISTRY: ghcr.io
+  IMAGE_NAME: cuda-base
+  # Upstream NVIDIA devel image this base builds on (Docker Hub, public)
+  BASE_IMAGE: nvidia/cuda:12.4.1-devel-ubuntu22.04
+  CUDA_VERSION: "12.4"
+  CUDA_ARCHS: ${{ inputs.cuda_archs || '60;61' }}
+  # Push on main / schedule / manual (unless unticked), never on PRs
+  DO_PUSH: ${{ github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.push) }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Fail early with a readable message if the build folder is missing.
+      - name: Check build context
+        run: |
+          if [ ! -f "${CONTEXT}/Dockerfile" ]; then
+            echo "::error::${CONTEXT}/Dockerfile not found in ${GITHUB_REPOSITORY}@${GITHUB_SHA::7}. Dockerfiles in this commit:"
+            git ls-files | grep -i dockerfile || echo "(none committed)"
+            exit 1
+          fi
+
+      # GHCR image names must be lowercase; repository_owner may not be.
+      - name: Resolve image name
+        run: |
+          OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "IMAGE=${REGISTRY}/${OWNER}/${IMAGE_NAME}" >> "$GITHUB_ENV"
+
+      # The CUDA devel image is ~9 GB unpacked; the stock runner only
+      # has ~14 GB free, so clear out preinstalled toolchains first.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL \
+                      /usr/local/.ghcup /usr/share/swift
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ env.CUDA_VERSION }}-devel
+            type=raw,value=${{ env.CUDA_VERSION }}-devel-{{date 'YYYYMMDD'}}
+            type=sha,prefix=${{ env.CUDA_VERSION }}-devel-sha-
+
+      # The plain "docker" driver builds straight into the local daemon,
+      # so the image can be smoke-tested and then pushed without a
+      # second ~9 GB copy (which the docker-container driver would need).
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.CONTEXT }}
+          load: true
+          push: false
+          pull: true
+          build-args: |
+            BASE_IMAGE=${{ env.BASE_IMAGE }}
+            CUDA_ARCHS=${{ env.CUDA_ARCHS }}
+            BUILDKIT_INLINE_CACHE=1
+          cache-from: type=registry,ref=${{ env.IMAGE }}:${{ env.CUDA_VERSION }}-devel
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # No GPU on hosted runners: checks the toolchain only, plus a real
+      # nvcc compile + cuBLAS link for the configured architectures.
+      - name: Smoke test
+        run: |
+          IMG="${IMAGE}:${CUDA_VERSION}-devel"
+          docker run --rm "$IMG" bash -euxc '
+            nvcc --version
+            cmake --version
+            ninja --version
+            ccache --version | head -1
+            test "$CUDAARCHS" = "'"$CUDA_ARCHS"'"
+            test -f /usr/local/cuda/include/cublas_v2.h
+            cat > /tmp/t.cu <<EOF
+          __global__ void k(float *x) { x[threadIdx.x] *= 2.0f; }
+          int main() { return 0; }
+          EOF
+            GENCODE=""
+            for a in $(echo "$CUDAARCHS" | tr ";" " "); do
+              GENCODE="$GENCODE -gencode arch=compute_$a,code=sm_$a"
+            done
+            nvcc $GENCODE -o /tmp/t /tmp/t.cu -lcublas
+            cuobjdump --list-elf /tmp/t
+          '
+
+      - name: Push
+        if: env.DO_PUSH == 'true'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          for tag in $TAGS; do
+            docker push "$tag"
+          done
+
+      - name: Summary
+        if: always()
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "### CUDA devel base"
+            echo "- Base: \`${BASE_IMAGE}\`"
+            echo "- CUDAARCHS: \`${CUDA_ARCHS}\`"
+            echo "- Pushed: \`${DO_PUSH}\`"
+            echo "- Tags:"
+            for t in $TAGS; do echo "  - \`$t\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"
